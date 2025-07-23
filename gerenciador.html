@@ -1,4 +1,26 @@
+#!/bin/bash
+
+# Verifica se é root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Este script deve ser executado como root. Use sudo ou faça login como root."
+  exit 1
+fi
+
+echo "➤ Atualizando o sistema e instalando dependências..."
+apt-get update -y
+apt-get install -y apache2 php libapache2-mod-php php-mbstring unzip
+
+echo "➤ Criando estrutura de diretórios..."
+mkdir -p /var/www/html/open/gerenciador/uploads
+chown -R www-data:www-data /var/www/html/open
+chmod -R 755 /var/www/html/open
+chmod 700 /var/www/html/open/gerenciador/uploads
+
+echo "➤ Criando o gerenciador de arquivos..."
+cat > /var/www/html/open/gerenciador/index.php << 'EOL'
 <?php
+session_start();
+
 // Configurações básicas
 $base_dir = __DIR__ . '/';
 $current_dir = isset($_GET['dir']) ? $_GET['dir'] : '';
@@ -34,6 +56,7 @@ if (isset($_GET['action'])) {
             if (isset($_GET['item'])) {
                 $item = $current_path . $_GET['item'];
                 if (is_dir($item)) {
+                    array_map('unlink', glob("$item/*"));
                     rmdir($item);
                 } else {
                     unlink($item);
@@ -74,6 +97,20 @@ if (isset($_GET['action'])) {
                 
                 if ($_SESSION['clipboard']['action'] === 'copy') {
                     if (is_dir($source)) {
+                        function copyDir($src, $dst) {
+                            $dir = opendir($src);
+                            @mkdir($dst);
+                            while (($file = readdir($dir)) !== false) {
+                                if ($file != '.' && $file != '..') {
+                                    if (is_dir($src . '/' . $file)) {
+                                        copyDir($src . '/' . $file, $dst . '/' . $file);
+                                    } else {
+                                        copy($src . '/' . $file, $dst . '/' . $file);
+                                    }
+                                }
+                            }
+                            closedir($dir);
+                        }
                         copyDir($source, $destination);
                     } else {
                         copy($source, $destination);
@@ -97,26 +134,41 @@ if (isset($_GET['action'])) {
                 move_uploaded_file($_FILES['file']['tmp_name'], $target);
             }
             break;
+            
+        case 'download':
+            if (isset($_GET['item'])) {
+                $file = $current_path . $_GET['item'];
+                if (file_exists($file)) {
+                    header('Content-Description: File Transfer');
+                    header('Content-Type: application/octet-stream');
+                    header('Content-Disposition: attachment; filename="'.basename($file).'"');
+                    header('Expires: 0');
+                    header('Cache-Control: must-revalidate');
+                    header('Pragma: public');
+                    header('Content-Length: ' . filesize($file));
+                    readfile($file);
+                    exit;
+                }
+            }
+            break;
+            
+        case 'view':
+            if (isset($_GET['item'])) {
+                $file = $current_path . $_GET['item'];
+                if (file_exists($file)) {
+                    $mime = mime_content_type($file);
+                    header('Content-Type: '.$mime);
+                    readfile($file);
+                    exit;
+                }
+            }
+            break;
     }
     
-    header("Location: ?dir=" . urlencode($current_dir));
-    exit;
-}
-
-// Função para copiar diretórios recursivamente
-function copyDir($src, $dst) {
-    $dir = opendir($src);
-    @mkdir($dst);
-    while (($file = readdir($dir)) !== false) {
-        if ($file != '.' && $file != '..') {
-            if (is_dir($src . '/' . $file)) {
-                copyDir($src . '/' . $file, $dst . '/' . $file);
-            } else {
-                copy($src . '/' . $file, $dst . '/' . $file);
-            }
-        }
+    if (!in_array($_GET['action'], ['download', 'view'])) {
+        header("Location: ?dir=" . urlencode($current_dir));
+        exit;
     }
-    closedir($dir);
 }
 
 // Listar arquivos e pastas
@@ -165,15 +217,9 @@ function formatSize($bytes) {
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
-        .file-item:hover {
-            background-color: #f3f4f6;
-        }
-        .editor {
-            min-height: 400px;
-        }
-        .breadcrumb a:hover {
-            text-decoration: underline;
-        }
+        .file-item:hover { background-color: #f3f4f6; }
+        .editor { min-height: 400px; }
+        .breadcrumb a:hover { text-decoration: underline; }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -437,3 +483,26 @@ function formatSize($bytes) {
     </script>
 </body>
 </html>
+EOL
+
+echo "➤ Configurando o firewall..."
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
+
+echo "➤ Ajustando configurações do PHP..."
+sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 100M/' /etc/php/*/apache2/php.ini
+sed -i 's/^post_max_size = .*/post_max_size = 100M/' /etc/php/*/apache2/php.ini
+sed -i 's/^memory_limit = .*/memory_limit = 256M/' /etc/php/*/apache2/php.ini
+
+echo "➤ Reiniciando o Apache..."
+systemctl restart apache2
+
+echo "✅ Instalação concluída com sucesso!"
+echo "Acesse seu gerenciador de arquivos em:"
+echo "http://$(curl -s ifconfig.me)/open/gerenciador/"
+echo ""
+echo "⚠️ Dicas de segurança:"
+echo "1. Considere proteger o diretório com autenticação"
+echo "2. Monitore o uso deste gerenciador de arquivos"
+echo "3. Restrinja o acesso por IP se necessário"
