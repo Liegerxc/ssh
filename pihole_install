@@ -6,47 +6,69 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Atualizar o sistema
-echo "Atualizando o sistema..."
-apt update -y && apt upgrade -y
+# Função para corrigir problemas de repositórios
+fix_repositories() {
+    echo "Corrigindo problemas de repositórios e DNS..."
+    
+    # Parar serviços que podem interferir
+    systemctl stop systemd-resolved
+    
+    # Configurar DNS público
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    
+    # Substituir mirrors padrão por alternativos
+    sed -i 's|http://.*archive.ubuntu.com|http://mirror.rackspace.com/ubuntu|g' /etc/apt/sources.list
+    sed -i 's|http://.*security.ubuntu.com|http://mirror.rackspace.com/ubuntu|g' /etc/apt/sources.list
+    
+    # Limpar cache e atualizar
+    apt clean
+    apt update --fix-missing
+    
+    # Verificar se a correção funcionou
+    if apt update 2>&1 | grep -q "Failed"; then
+        echo "Erro: Não foi possível corrigir os repositórios. Verifique sua conexão de rede."
+        exit 1
+    fi
+}
 
-# Instalar dependências
-echo "Instalando dependências..."
-apt install -y curl wget git ufw
+# Atualizar o sistema com tratamento de erros
+update_system() {
+    echo "Atualizando o sistema..."
+    if ! apt update -y && apt upgrade -y; then
+        echo "Erro durante a atualização do sistema. Tentando corrigir..."
+        fix_repositories
+        apt update -y && apt upgrade -y
+    fi
+}
 
-# Configurar firewall (UFW)
-echo "Configurando firewall..."
-ufw allow ssh
-ufw allow 53/udp    # DNS Pi-hole
-ufw allow 51820/udp # WireGuard
-ufw --force enable
-
-# Instalar Pi-hole (Automático)
-echo "Instalando Pi-hole..."
-curl -sSL https://install.pi-hole.net | bash
-
-# Mensagem pós-instalação Pi-hole
-echo "---------------------------------------------"
-echo "Pi-hole instalado!"
-echo "Senha da interface web:"
-echo "Execute 'pihole -a -p' para definir uma senha."
-echo "---------------------------------------------"
+# Instalar Pi-hole com fallback
+install_pihole() {
+    echo "Instalando Pi-hole..."
+    if ! curl -sSL https://install.pi-hole.net | bash; then
+        echo "Erro na instalação automática do Pi-hole. Tentando método alternativo..."
+        apt install -y git
+        git clone --depth 1 https://github.com/pi-hole/pi-hole.git Pi-hole
+        cd Pi-hole/automated\ install/
+        bash basic-install.sh
+        cd ../..
+    fi
+}
 
 # Instalar WireGuard
-echo "Instalando WireGuard..."
-apt install -y wireguard resolvconf qrencode
-
-# Gerar chaves WireGuard
-echo "Gerando configurações do WireGuard..."
-cd /etc/wireguard
-umask 077
-wg genkey | tee privatekey | wg pubkey > publickey
-
-# Configurar WireGuard (substitua 'SEU_IP_VPS' pelo IP do seu VPS)
-SERVER_IP=$(curl -4 ifconfig.co)
-SERVER_PRIVKEY=$(cat privatekey)
-
-cat > /etc/wireguard/wg0.conf <<EOF
+install_wireguard() {
+    echo "Instalando WireGuard..."
+    apt install -y wireguard resolvconf qrencode
+    
+    # Configurar WireGuard
+    cd /etc/wireguard
+    umask 077
+    wg genkey | tee privatekey | wg pubkey > publickey
+    
+    SERVER_IP=$(curl -4 ifconfig.co)
+    SERVER_PRIVKEY=$(cat privatekey)
+    
+    cat > wg0.conf <<EOF
 [Interface]
 Address = 10.8.0.1/24
 ListenPort = 51820
@@ -56,23 +78,20 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -
 SaveConfig = true
 EOF
 
-# Ativar NAT (para roteamento VPN)
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -p
-
-# Iniciar WireGuard
-systemctl enable --now wg-quick@wg0
-
-# Criar cliente WireGuard (dispositivo doméstico)
-CLIENT_IP="10.8.0.2"
-CLIENT_PRIVKEY=$(wg genkey)
-CLIENT_PUBKEY=$(echo $CLIENT_PRIVKEY | wg pubkey)
-
-cat > /etc/wireguard/client.conf <<EOF
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    sysctl -p
+    
+    systemctl enable --now wg-quick@wg0
+    
+    # Criar configuração do cliente
+    CLIENT_PRIVKEY=$(wg genkey)
+    CLIENT_PUBKEY=$(echo $CLIENT_PRIVKEY | wg pubkey)
+    
+    cat > client.conf <<EOF
 [Interface]
 PrivateKey = $CLIENT_PRIVKEY
-Address = $CLIENT_IP/24
-DNS = 10.8.0.1  # Usa o Pi-hole como DNS
+Address = 10.8.0.2/24
+DNS = 10.8.0.1
 
 [Peer]
 PublicKey = $(cat publickey)
@@ -81,20 +100,34 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
-# Adicionar cliente ao servidor WireGuard
-wg set wg0 peer $CLIENT_PUBKEY allowed-ips $CLIENT_IP/32
+    wg set wg0 peer $CLIENT_PUBKEY allowed-ips 10.8.0.2/32
+}
 
-# Gerar QR Code para conexão móvel
-apt install -y qrencode
-qrencode -t ansiutf8 < /etc/wireguard/client.conf
+# Configurar firewall
+setup_firewall() {
+    echo "Configurando firewall..."
+    ufw allow ssh
+    ufw allow 53/udp
+    ufw allow 51820/udp
+    ufw --force enable
+}
 
+# Main execution
+update_system
+setup_firewall
+install_pihole
+install_wireguard
+
+# Mostrar informações finais
 echo "---------------------------------------------"
-echo "Configuração concluída!"
+echo "Instalação concluída com sucesso!"
 echo ""
-echo "1. Pi-hole: Acesse http://$SERVER_IP/admin"
-echo "2. WireGuard:"
-echo "   - Copie o arquivo '/etc/wireguard/client.conf' para seu dispositivo."
-echo "   - Ou use o QR Code acima para conectar um dispositivo móvel."
+echo "Pi-hole:"
+echo "  - Acesse o painel em: http://$(hostname -I | awk '{print $1}')/admin"
+echo "  - Defina sua senha com: pihole -a -p"
 echo ""
-echo "Recomendado: Altere a senha do Pi-hole com 'pihole -a -p'"
+echo "WireGuard:"
+echo "  - Configuração do cliente em: /etc/wireguard/client.conf"
+echo "  - QR Code para conexão móvel:"
+qrencode -t ansiutf8 < /etc/wireguard/client.conf
 echo "---------------------------------------------"
