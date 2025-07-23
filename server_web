@@ -1,144 +1,58 @@
 #!/bin/bash
 
-# Script de instalação de servidor web para Oracle Ampere (ARM64)
-# Suporta: Nginx ou Apache, PHP, MySQL/MariaDB
-# Por padrão, instala Nginx + PHP-FPM + MariaDB
-
-# Cores para output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m' # No Color
-
-# Verifica se é root
-if [ "$(id -u)" != "0" ]; then
-   echo -e "${RED}Este script deve ser executado como root${NC}" 1>&2
-   exit 1
-fi
-
-# Detecta distro
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-    OS_VERSION=$VERSION_ID
-else
-    echo -e "${RED}Não foi possível detectar o sistema operacional${NC}"
+# Verifica se o script está sendo executado como root
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Este script deve ser executado como root. Use sudo ou faça login como root."
     exit 1
 fi
 
-# Configurações
-WEB_SERVER="nginx"  # nginx ou apache
-PHP_VERSION="8.1"   # 7.4, 8.0, 8.1, 8.2
-DB_SERVER="mariadb" # mariadb ou mysql
-INSTALL_COMPOSER=true
-INSTALL_WP_CLI=false
-
-# Atualiza sistema
-echo -e "${YELLOW}Atualizando o sistema...${NC}"
-apt-get update
+# Atualiza os pacotes do sistema
+echo "Atualizando o sistema..."
+apt-get update -y
 apt-get upgrade -y
 
-# Instala utilitários básicos
-echo -e "${YELLOW}Instalando utilitários...${NC}"
-apt-get install -y curl wget git unzip htop
+# Instala o servidor Apache
+echo "Instalando o Apache..."
+apt-get install apache2 -y
 
-# Instala servidor web
-if [ "$WEB_SERVER" = "nginx" ]; then
-    echo -e "${YELLOW}Instalando Nginx...${NC}"
-    apt-get install -y nginx
-    
-    # Configura PHP-FPM
-    echo -e "${YELLOW}Configurando PHP-FPM...${NC}"
-    sed -i "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/" /etc/php/$PHP_VERSION/fpm/php.ini
-    systemctl restart php$PHP_VERSION-fpm
-    
-    # Configura Nginx para usar PHP-FPM
-    cat > /etc/nginx/sites-available/default <<EOF
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
+# Habilita os módulos necessários
+echo "Habilitando módulos do Apache..."
+a2enmod rewrite
+a2enmod ssl
+a2enmod headers
 
-    root /var/www/html;
-    index index.php index.html index.htm;
+# Configura o firewall (UFW)
+echo "Configurando o firewall..."
+apt-get install ufw -y
+ufw allow 22/tcp    # SSH
+ufw allow 80/tcp    # HTTP
+ufw allow 443/tcp   # HTTPS
+ufw --force enable
 
-    server_name _;
+# Configuração adicional para Oracle Cloud - liberar portas no iptables
+echo "Configurando iptables para Oracle Cloud..."
+iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+iptables-save > /etc/iptables/rules.v4
 
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
+# Reinicia o Apache para aplicar as configurações
+echo "Reiniciando o Apache..."
+systemctl restart apache2
 
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php$PHP_VERSION-fpm.sock;
-    }
+# Habilita o Apache para iniciar automaticamente
+systemctl enable apache2
 
-    location ~ /\.ht {
-        deny all;
-    }
-}
-EOF
-    
-    systemctl restart nginx
-    
-elif [ "$WEB_SERVER" = "apache" ]; then
-    echo -e "${YELLOW}Instalando Apache...${NC}"
-    apt-get install -y apache2 libapache2-mod-php$PHP_VERSION
-    a2enmod php$PHP_VERSION
-    a2enmod rewrite
-    systemctl restart apache2
-else
-    echo -e "${RED}Servidor web não reconhecido: $WEB_SERVER${NC}"
-    exit 1
-fi
+# Verifica o status do Apache
+echo "Verificando o status do Apache..."
+systemctl status apache2 --no-pager
 
-# Instala PHP
-echo -e "${YELLOW}Instalando PHP $PHP_VERSION...${NC}"
-apt-get install -y php$PHP_VERSION php$PHP_VERSION-fpm php$PHP_VERSION-mysql php$PHP_VERSION-curl \
-                   php$PHP_VERSION-gd php$PHP_VERSION-mbstring php$PHP_VERSION-xml php$PHP_VERSION-zip \
-                   php$PHP_VERSION-bcmath php$PHP_VERSION-intl
-
-# Instala banco de dados
-if [ "$DB_SERVER" = "mariadb" ]; then
-    echo -e "${YELLOW}Instalando MariaDB...${NC}"
-    apt-get install -y mariadb-server
-    mysql_secure_installation
-elif [ "$DB_SERVER" = "mysql" ]; then
-    echo -e "${YELLOW}Instalando MySQL...${NC}"
-    apt-get install -y mysql-server
-    mysql_secure_installation
-else
-    echo -e "${RED}Banco de dados não reconhecido: $DB_SERVER${NC}"
-    exit 1
-fi
-
-# Instala Composer (opcional)
-if [ "$INSTALL_COMPOSER" = true ]; then
-    echo -e "${YELLOW}Instalando Composer...${NC}"
-    curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-fi
-
-# Instala WP-CLI (opcional)
-if [ "$INSTALL_WP_CLI" = true ]; then
-    echo -e "${YELLOW}Instalando WP-CLI...${NC}"
-    curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
-    chmod +x wp-cli.phar
-    mv wp-cli.phar /usr/local/bin/wp
-fi
-
-# Cria teste PHP
-echo -e "${YELLOW}Criando arquivo de teste PHP...${NC}"
-echo "<?php phpinfo(); ?>" > /var/www/html/info.php
-chown -R www-data:www-data /var/www/html
-
-# Mostra informações
-IP=$(curl -s ifconfig.me)
-echo -e "${GREEN}Instalação concluída com sucesso!${NC}"
-echo -e "${YELLOW}=================================${NC}"
-echo -e "${GREEN}Acesse seu servidor em:${NC}"
-echo -e "http://$IP"
-echo -e "http://$IP/info.php"
-echo -e "${YELLOW}=================================${NC}"
-echo -e "${GREEN}Servidor Web:${NC} $WEB_SERVER"
-echo -e "${GREEN}PHP Versão:${NC} $PHP_VERSION"
-echo -e "${GREEN}Banco de Dados:${NC} $DB_SERVER"
-echo -e "${YELLOW}=================================${NC}"
+# Informações finais
+echo ""
+echo "============================================"
+echo "Servidor Apache instalado com sucesso!"
+echo "Acesse seu servidor através de:"
+echo "HTTP: http://$(curl -s ifconfig.me)"
+echo "HTTPS: https://$(curl -s ifconfig.me)"
+echo ""
+echo "Seu conteúdo web deve ser colocado em: /var/www/html/"
+echo "============================================"
