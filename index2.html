@@ -1,138 +1,439 @@
 <?php
-// Configurações
-$upload_dir = 'uploads/';
-$max_file_size = 100 * 1024 * 1024; // 100MB
+// Configurações básicas
+$base_dir = __DIR__ . '/';
+$current_dir = isset($_GET['dir']) ? $_GET['dir'] : '';
+$current_path = realpath($base_dir . $current_dir) . '/';
 
-// Processar upload
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
-    $file = $_FILES['file'];
-    
-    // Verifica apenas tamanho e erros básicos
-    if ($file['error'] === UPLOAD_ERR_OK) {
-        if ($file['size'] > $max_file_size) {
-            $message = 'Arquivo muito grande (máximo ' . round($max_file_size / (1024*1024)) . 'MB)';
-        } else {
-            $target_path = $upload_dir . basename($file['name']);
+// Verificação de segurança
+if (strpos($current_path, $base_dir) !== 0) {
+    die('Acesso não permitido');
+}
+
+// Ações do gerenciador
+if (isset($_GET['action'])) {
+    switch ($_GET['action']) {
+        case 'create_folder':
+            if (isset($_POST['folder_name'])) {
+                $new_folder = $current_path . $_POST['folder_name'];
+                if (!file_exists($new_folder)) {
+                    mkdir($new_folder, 0755, true);
+                }
+            }
+            break;
             
-            if (move_uploaded_file($file['tmp_name'], $target_path)) {
-                $message = 'Arquivo enviado com sucesso!';
+        case 'create_file':
+            if (isset($_POST['file_name'])) {
+                $new_file = $current_path . $_POST['file_name'];
+                if (!file_exists($new_file)) {
+                    file_put_contents($new_file, '');
+                }
+            }
+            break;
+            
+        case 'delete':
+            if (isset($_GET['item'])) {
+                $item = $current_path . $_GET['item'];
+                if (is_dir($item)) {
+                    rmdir($item);
+                } else {
+                    unlink($item);
+                }
+            }
+            break;
+            
+        case 'rename':
+            if (isset($_POST['old_name']) && isset($_POST['new_name'])) {
+                $old = $current_path . $_POST['old_name'];
+                $new = $current_path . $_POST['new_name'];
+                rename($old, $new);
+            }
+            break;
+            
+        case 'copy':
+            if (isset($_GET['item'])) {
+                $_SESSION['clipboard'] = [
+                    'action' => 'copy',
+                    'item' => $current_path . $_GET['item']
+                ];
+            }
+            break;
+            
+        case 'cut':
+            if (isset($_GET['item'])) {
+                $_SESSION['clipboard'] = [
+                    'action' => 'cut',
+                    'item' => $current_path . $_GET['item']
+                ];
+            }
+            break;
+            
+        case 'paste':
+            if (isset($_SESSION['clipboard'])) {
+                $source = $_SESSION['clipboard']['item'];
+                $destination = $current_path . basename($source);
+                
+                if ($_SESSION['clipboard']['action'] === 'copy') {
+                    if (is_dir($source)) {
+                        copyDir($source, $destination);
+                    } else {
+                        copy($source, $destination);
+                    }
+                } else {
+                    rename($source, $destination);
+                    unset($_SESSION['clipboard']);
+                }
+            }
+            break;
+            
+        case 'edit':
+            if (isset($_POST['content']) && isset($_GET['item'])) {
+                file_put_contents($current_path . $_GET['item'], $_POST['content']);
+            }
+            break;
+            
+        case 'upload':
+            if (isset($_FILES['file'])) {
+                $target = $current_path . basename($_FILES['file']['name']);
+                move_uploaded_file($_FILES['file']['tmp_name'], $target);
+            }
+            break;
+    }
+    
+    header("Location: ?dir=" . urlencode($current_dir));
+    exit;
+}
+
+// Função para copiar diretórios recursivamente
+function copyDir($src, $dst) {
+    $dir = opendir($src);
+    @mkdir($dst);
+    while (($file = readdir($dir)) !== false) {
+        if ($file != '.' && $file != '..') {
+            if (is_dir($src . '/' . $file)) {
+                copyDir($src . '/' . $file, $dst . '/' . $file);
             } else {
-                $message = 'Erro ao mover o arquivo.';
+                copy($src . '/' . $file, $dst . '/' . $file);
             }
         }
+    }
+    closedir($dir);
+}
+
+// Listar arquivos e pastas
+$items = scandir($current_path);
+$folders = [];
+$files = [];
+
+foreach ($items as $item) {
+    if ($item == '.' || $item == '..') continue;
+    
+    $path = $current_path . $item;
+    if (is_dir($path)) {
+        $folders[$item] = [
+            'type' => 'folder',
+            'size' => '-',
+            'modified' => date('d/m/Y H:i', filemtime($path))
+        ];
     } else {
-        $message = 'Erro no upload: ' . $file['error'];
+        $files[$item] = [
+            'type' => 'file',
+            'size' => formatSize(filesize($path)),
+            'modified' => date('d/m/Y H:i', filemtime($path))
+        ];
     }
 }
 
-// Listar arquivos
-$files = glob($upload_dir . '*');
+// Função para formatar tamanhos
+function formatSize($bytes) {
+    if ($bytes >= 1073741824) {
+        return number_format($bytes / 1073741824, 2) . ' GB';
+    } elseif ($bytes >= 1048576) {
+        return number_format($bytes / 1048576, 2) . ' MB';
+    } elseif ($bytes >= 1024) {
+        return number_format($bytes / 1024, 2) . ' KB';
+    } else {
+        return $bytes . ' bytes';
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Upload de Arquivos</title>
+    <title>Gerenciador de Arquivos</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
-        .file-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        .file-item:hover {
+            background-color: #f3f4f6;
         }
-        .file-icon {
-            font-size: 3rem;
+        .editor {
+            min-height: 400px;
         }
-        .progress-bar {
-            height: 5px;
-            background-color: #3B82F6;
-            width: 0%;
-            transition: width 0.3s;
+        .breadcrumb a:hover {
+            text-decoration: underline;
         }
     </style>
 </head>
-<body class="bg-gray-50 min-h-screen">
+<body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
-        <div class="max-w-4xl mx-auto bg-white rounded-xl shadow-md overflow-hidden p-6">
-            <h1 class="text-3xl font-bold text-gray-800 mb-6">Upload de Arquivos</h1>
-            
-            <?php if (isset($message)): ?>
-                <div class="mb-4 p-4 <?php echo strpos($message, 'sucesso') !== false ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'; ?> rounded-lg">
-                    <?php echo htmlspecialchars($message); ?>
+        <div class="bg-white rounded-lg shadow-md overflow-hidden">
+            <!-- Cabeçalho -->
+            <div class="bg-blue-600 text-white px-6 py-4">
+                <h1 class="text-2xl font-bold">Gerenciador de Arquivos</h1>
+                <div class="breadcrumb text-sm mt-2">
+                    <?php
+                    $path_parts = explode('/', trim($current_dir, '/'));
+                    $current_path_breadcrumb = '';
+                    echo '<a href="?dir=" class="text-blue-200"><i class="fas fa-home"></i> /</a>';
+                    foreach ($path_parts as $part) {
+                        if (!empty($part)) {
+                            $current_path_breadcrumb .= $part . '/';
+                            echo ' <span class="text-white">›</span> <a href="?dir=' . urlencode($current_path_breadcrumb) . '" class="text-blue-200">' . htmlspecialchars($part) . '</a>';
+                        }
+                    }
+                    ?>
                 </div>
-            <?php endif; ?>
+            </div>
             
-            <form method="POST" enctype="multipart/form-data" class="mb-8" id="uploadForm">
-                <div class="flex items-center justify-center w-full">
-                    <label for="file" class="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100">
-                        <div class="flex flex-col items-center justify-center pt-5 pb-6">
-                            <svg class="w-8 h-8 mb-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
-                            </svg>
-                            <p class="mb-2 text-sm text-gray-500">Clique para selecionar ou arraste o arquivo</p>
-                            <p class="text-xs text-gray-500">Qualquer tipo de arquivo (máximo <?php echo round($max_file_size / (1024*1024)); ?>MB)</p>
-                        </div>
-                        <input id="file" name="file" type="file" class="hidden" />
+            <!-- Barra de ferramentas -->
+            <div class="bg-gray-50 px-6 py-3 border-b flex flex-wrap gap-2">
+                <button onclick="showModal('createFolderModal')" class="px-3 py-1 bg-blue-100 text-blue-800 rounded hover:bg-blue-200 text-sm">
+                    <i class="fas fa-folder-plus"></i> Nova Pasta
+                </button>
+                <button onclick="showModal('createFileModal')" class="px-3 py-1 bg-blue-100 text-blue-800 rounded hover:bg-blue-200 text-sm">
+                    <i class="fas fa-file-alt"></i> Novo Arquivo
+                </button>
+                <form method="post" enctype="multipart/form-data" class="flex items-center">
+                    <input type="hidden" name="action" value="upload">
+                    <label class="px-3 py-1 bg-green-100 text-green-800 rounded hover:bg-green-200 cursor-pointer text-sm">
+                        <i class="fas fa-upload"></i> Upload
+                        <input type="file" name="file" class="hidden" onchange="this.form.submit()">
                     </label>
+                </form>
+                
+                <?php if (isset($_SESSION['clipboard'])): ?>
+                    <button onclick="location.href='?action=paste&dir=<?= urlencode($current_dir) ?>'" 
+                            class="px-3 py-1 bg-purple-100 text-purple-800 rounded hover:bg-purple-200 text-sm">
+                        <i class="fas fa-paste"></i> Colar (<?= $_SESSION['clipboard']['action'] == 'copy' ? 'Cópia' : 'Mover' ?>)
+                    </button>
+                <?php endif; ?>
+            </div>
+            
+            <!-- Listagem de arquivos -->
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nome</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tamanho</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Modificado</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        <!-- Pastas -->
+                        <?php foreach ($folders as $name => $info): ?>
+                            <tr class="file-item">
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <a href="?dir=<?= urlencode($current_dir . $name . '/') ?>" class="text-blue-600 hover:text-blue-800">
+                                        <i class="fas fa-folder text-yellow-500"></i> <?= htmlspecialchars($name) ?>
+                                    </a>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['size'] ?></td>
+                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['modified'] ?></td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex space-x-2">
+                                        <button onclick="renameItem('<?= htmlspecialchars($name) ?>')" class="text-blue-600 hover:text-blue-800">
+                                            <i class="fas fa-edit"></i>
+                                        </button>
+                                        <button onclick="copyItem('<?= htmlspecialchars($name) ?>')" class="text-green-600 hover:text-green-800">
+                                            <i class="far fa-copy"></i>
+                                        </button>
+                                        <button onclick="cutItem('<?= htmlspecialchars($name) ?>')" class="text-purple-600 hover:text-purple-800">
+                                            <i class="fas fa-cut"></i>
+                                        </button>
+                                        <button onclick="deleteItem('<?= htmlspecialchars($name) ?>')" class="text-red-600 hover:text-red-800">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        
+                        <!-- Arquivos -->
+                        <?php foreach ($files as $name => $info): ?>
+                            <tr class="file-item">
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <?php
+                                    $icon = 'fa-file';
+                                    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+                                    $icon_colors = [
+                                        'pdf' => 'text-red-500',
+                                        'jpg' => 'text-blue-500', 'jpeg' => 'text-blue-500', 'png' => 'text-blue-500', 'gif' => 'text-blue-500',
+                                        'doc' => 'text-blue-400', 'docx' => 'text-blue-400',
+                                        'xls' => 'text-green-500', 'xlsx' => 'text-green-500',
+                                        'zip' => 'text-yellow-500', 'rar' => 'text-yellow-500', '7z' => 'text-yellow-500',
+                                        'mp3' => 'text-purple-500', 'wav' => 'text-purple-500',
+                                        'mp4' => 'text-pink-500', 'avi' => 'text-pink-500', 'mkv' => 'text-pink-500'
+                                    ];
+                                    
+                                    if (array_key_exists($ext, $icon_colors)) {
+                                        $icon_color = $icon_colors[$ext];
+                                    } else {
+                                        $icon_color = 'text-gray-500';
+                                    }
+                                    ?>
+                                    <a href="?action=view&dir=<?= urlencode($current_dir) ?>&item=<?= urlencode($name) ?>" class="text-blue-600 hover:text-blue-800">
+                                        <i class="fas <?= $icon ?> <?= $icon_color ?>"></i> <?= htmlspecialchars($name) ?>
+                                    </a>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['size'] ?></td>
+                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['modified'] ?></td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex space-x-2">
+                                        <button onclick="editFile('<?= htmlspecialchars($current_dir) ?>', '<?= htmlspecialchars($name) ?>')" class="text-blue-600 hover:text-blue-800">
+                                            <i class="fas fa-edit"></i>
+                                        </button>
+                                        <button onclick="copyItem('<?= htmlspecialchars($name) ?>')" class="text-green-600 hover:text-green-800">
+                                            <i class="far fa-copy"></i>
+                                        </button>
+                                        <button onclick="cutItem('<?= htmlspecialchars($name) ?>')" class="text-purple-600 hover:text-purple-800">
+                                            <i class="fas fa-cut"></i>
+                                        </button>
+                                        <button onclick="deleteItem('<?= htmlspecialchars($name) ?>')" class="text-red-600 hover:text-red-800">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                        <a href="?action=download&dir=<?= urlencode($current_dir) ?>&item=<?= urlencode($name) ?>" class="text-green-600 hover:text-green-800">
+                                            <i class="fas fa-download"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modais -->
+    <div id="createFolderModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 w-96">
+            <h3 class="text-lg font-bold mb-4">Criar Nova Pasta</h3>
+            <form method="post" action="?action=create_folder&dir=<?= urlencode($current_dir) ?>">
+                <input type="text" name="folder_name" class="w-full px-3 py-2 border rounded mb-4" placeholder="Nome da pasta" required>
+                <div class="flex justify-end space-x-2">
+                    <button type="button" onclick="hideModal('createFolderModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Criar</button>
                 </div>
-                <div class="progress-bar mt-2 rounded-full"></div>
-                <button type="submit" class="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">Enviar Arquivo</button>
             </form>
-            
-            <h2 class="text-2xl font-semibold text-gray-800 mb-4">Arquivos Disponíveis</h2>
-            
-            <?php if (empty($files)): ?>
-                <p class="text-gray-500">Nenhum arquivo disponível.</p>
-            <?php else: ?>
-                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                    <?php foreach ($files as $file): ?>
-                        <?php
-                        $filename = basename($file);
-                        $filepath = $upload_dir . $filename;
-                        $filetype = mime_content_type($file);
-                        $filesize = filesize($file);
-                        $icon = '📄';
-                        
-                        // Ícones para tipos comuns
-                        if (strpos($filetype, 'image/') === 0) $icon = '🖼️';
-                        elseif ($filetype === 'application/pdf') $icon = '📕';
-                        elseif ($filetype === 'application/zip') $icon = '🗄️';
-                        elseif (strpos($filetype, 'video/') === 0) $icon = '🎬';
-                        elseif (strpos($filetype, 'audio/') === 0) $icon = '🎵';
-                        ?>
-                        
-                        <div class="file-card bg-white rounded-lg border border-gray-200 p-4 transition duration-300">
-                            <div class="text-center mb-2">
-                                <span class="file-icon"><?php echo $icon; ?></span>
-                            </div>
-                            <div class="text-center">
-                                <p class="font-medium text-gray-800 truncate"><?php echo htmlspecialchars($filename); ?></p>
-                                <p class="text-sm text-gray-500"><?php echo round($filesize / 1024, 2); ?> KB</p>
-                                <div class="mt-2 flex justify-center space-x-2">
-                                    <a href="<?php echo htmlspecialchars($filepath); ?>" download class="px-3 py-1 bg-green-100 text-green-800 text-sm rounded hover:bg-green-200">Download</a>
-                                    <?php if (strpos($filetype, 'image/') === 0 || $filetype === 'application/pdf'): ?>
-                                        <a href="<?php echo htmlspecialchars($filepath); ?>" target="_blank" class="px-3 py-1 bg-blue-100 text-blue-800 text-sm rounded hover:bg-blue-200">Visualizar</a>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                        </div>
-                    <?php endforeach; ?>
+        </div>
+    </div>
+
+    <div id="createFileModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 w-96">
+            <h3 class="text-lg font-bold mb-4">Criar Novo Arquivo</h3>
+            <form method="post" action="?action=create_file&dir=<?= urlencode($current_dir) ?>">
+                <input type="text" name="file_name" class="w-full px-3 py-2 border rounded mb-4" placeholder="Nome do arquivo (ex: arquivo.txt)" required>
+                <div class="flex justify-end space-x-2">
+                    <button type="button" onclick="hideModal('createFileModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Criar</button>
                 </div>
-            <?php endif; ?>
+            </form>
+        </div>
+    </div>
+
+    <div id="renameModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 w-96">
+            <h3 class="text-lg font-bold mb-4">Renomear</h3>
+            <form method="post" action="?action=rename&dir=<?= urlencode($current_dir) ?>">
+                <input type="hidden" id="oldName" name="old_name">
+                <input type="text" id="newName" name="new_name" class="w-full px-3 py-2 border rounded mb-4" required>
+                <div class="flex justify-end space-x-2">
+                    <button type="button" onclick="hideModal('renameModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Renomear</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="deleteModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 w-96">
+            <h3 class="text-lg font-bold mb-4">Confirmar Exclusão</h3>
+            <p class="mb-4">Tem certeza que deseja excluir <span id="itemToDelete" class="font-semibold"></span>?</p>
+            <div class="flex justify-end space-x-2">
+                <button type="button" onclick="hideModal('deleteModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
+                <button type="button" onclick="confirmDelete()" class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">Excluir</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="editorModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 w-full max-w-4xl max-h-screen overflow-auto">
+            <h3 class="text-lg font-bold mb-4" id="editorTitle">Editar Arquivo</h3>
+            <form method="post" action="?action=edit&dir=<?= urlencode($current_dir) ?>" id="editorForm">
+                <input type="hidden" id="editItem" name="item">
+                <textarea id="fileContent" name="content" class="w-full px-3 py-2 border rounded editor font-mono"></textarea>
+                <div class="flex justify-end space-x-2 mt-4">
+                    <button type="button" onclick="hideModal('editorModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Salvar</button>
+                </div>
+            </form>
         </div>
     </div>
 
     <script>
-        // Mostrar progresso de upload (visual apenas)
-        document.getElementById('uploadForm').addEventListener('submit', function() {
-            const progressBar = document.querySelector('.progress-bar');
-            let progress = 0;
-            const interval = setInterval(() => {
-                progress += 5;
-                progressBar.style.width = progress + '%';
-                if (progress >= 100) clearInterval(interval);
-            }, 100);
-        });
+        // Funções para mostrar/esconder modais
+        function showModal(id) {
+            document.getElementById(id).classList.remove('hidden');
+        }
+        
+        function hideModal(id) {
+            document.getElementById(id).classList.add('hidden');
+        }
+        
+        // Funções para ações
+        function renameItem(name) {
+            document.getElementById('oldName').value = name;
+            document.getElementById('newName').value = name;
+            showModal('renameModal');
+        }
+        
+        function copyItem(name) {
+            location.href = `?action=copy&dir=<?= urlencode($current_dir) ?>&item=${encodeURIComponent(name)}`;
+        }
+        
+        function cutItem(name) {
+            location.href = `?action=cut&dir=<?= urlencode($current_dir) ?>&item=${encodeURIComponent(name)}`;
+        }
+        
+        function deleteItem(name) {
+            document.getElementById('itemToDelete').textContent = name;
+            window.itemToDelete = name;
+            showModal('deleteModal');
+        }
+        
+        function confirmDelete() {
+            location.href = `?action=delete&dir=<?= urlencode($current_dir) ?>&item=${encodeURIComponent(window.itemToDelete)}`;
+        }
+        
+        // Editor de arquivos
+        async function editFile(dir, file) {
+            document.getElementById('editorTitle').textContent = `Editando: ${file}`;
+            document.getElementById('editItem').value = file;
+            
+            try {
+                const response = await fetch(`?action=view&dir=${encodeURIComponent(dir)}&item=${encodeURIComponent(file)}`);
+                const content = await response.text();
+                document.getElementById('fileContent').value = content;
+                showModal('editorModal');
+            } catch (error) {
+                alert('Erro ao carregar arquivo');
+                console.error(error);
+            }
+        }
     </script>
 </body>
 </html>
