@@ -6,503 +6,169 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo "➤ Atualizando o sistema e instalando dependências..."
+echo "➤ Atualizando o sistema..."
 apt-get update -y
-apt-get install -y apache2 php libapache2-mod-php php-mbstring unzip
+apt-get upgrade -y
 
-echo "➤ Criando estrutura de diretórios..."
-mkdir -p /var/www/html/open/gerenciador/uploads
+echo "➤ Instalando dependências..."
+apt-get install -y shellinabox openssh-client
+
+echo "➤ Configurando estrutura de diretórios..."
+mkdir -p /var/www/html/open/webssh
 chown -R www-data:www-data /var/www/html/open
 chmod -R 755 /var/www/html/open
-chmod 700 /var/www/html/open/gerenciador/uploads
 
-echo "➤ Criando o gerenciador de arquivos..."
-cat > /var/www/html/open/gerenciador/index.php << 'EOL'
-<?php
-session_start();
-
-// Configurações básicas
-$base_dir = __DIR__ . '/';
-$current_dir = isset($_GET['dir']) ? $_GET['dir'] : '';
-$current_path = realpath($base_dir . $current_dir) . '/';
-
-// Verificação de segurança
-if (strpos($current_path, $base_dir) !== 0) {
-    die('Acesso não permitido');
-}
-
-// Ações do gerenciador
-if (isset($_GET['action'])) {
-    switch ($_GET['action']) {
-        case 'create_folder':
-            if (isset($_POST['folder_name'])) {
-                $new_folder = $current_path . $_POST['folder_name'];
-                if (!file_exists($new_folder)) {
-                    mkdir($new_folder, 0755, true);
-                }
-            }
-            break;
-            
-        case 'create_file':
-            if (isset($_POST['file_name'])) {
-                $new_file = $current_path . $_POST['file_name'];
-                if (!file_exists($new_file)) {
-                    file_put_contents($new_file, '');
-                }
-            }
-            break;
-            
-        case 'delete':
-            if (isset($_GET['item'])) {
-                $item = $current_path . $_GET['item'];
-                if (is_dir($item)) {
-                    array_map('unlink', glob("$item/*"));
-                    rmdir($item);
-                } else {
-                    unlink($item);
-                }
-            }
-            break;
-            
-        case 'rename':
-            if (isset($_POST['old_name']) && isset($_POST['new_name'])) {
-                $old = $current_path . $_POST['old_name'];
-                $new = $current_path . $_POST['new_name'];
-                rename($old, $new);
-            }
-            break;
-            
-        case 'copy':
-            if (isset($_GET['item'])) {
-                $_SESSION['clipboard'] = [
-                    'action' => 'copy',
-                    'item' => $current_path . $_GET['item']
-                ];
-            }
-            break;
-            
-        case 'cut':
-            if (isset($_GET['item'])) {
-                $_SESSION['clipboard'] = [
-                    'action' => 'cut',
-                    'item' => $current_path . $_GET['item']
-                ];
-            }
-            break;
-            
-        case 'paste':
-            if (isset($_SESSION['clipboard'])) {
-                $source = $_SESSION['clipboard']['item'];
-                $destination = $current_path . basename($source);
-                
-                if ($_SESSION['clipboard']['action'] === 'copy') {
-                    if (is_dir($source)) {
-                        function copyDir($src, $dst) {
-                            $dir = opendir($src);
-                            @mkdir($dst);
-                            while (($file = readdir($dir)) !== false) {
-                                if ($file != '.' && $file != '..') {
-                                    if (is_dir($src . '/' . $file)) {
-                                        copyDir($src . '/' . $file, $dst . '/' . $file);
-                                    } else {
-                                        copy($src . '/' . $file, $dst . '/' . $file);
-                                    }
-                                }
-                            }
-                            closedir($dir);
-                        }
-                        copyDir($source, $destination);
-                    } else {
-                        copy($source, $destination);
-                    }
-                } else {
-                    rename($source, $destination);
-                    unset($_SESSION['clipboard']);
-                }
-            }
-            break;
-            
-        case 'edit':
-            if (isset($_POST['content']) && isset($_GET['item'])) {
-                file_put_contents($current_path . $_GET['item'], $_POST['content']);
-            }
-            break;
-            
-        case 'upload':
-            if (isset($_FILES['file'])) {
-                $target = $current_path . basename($_FILES['file']['name']);
-                move_uploaded_file($_FILES['file']['tmp_name'], $target);
-            }
-            break;
-            
-        case 'download':
-            if (isset($_GET['item'])) {
-                $file = $current_path . $_GET['item'];
-                if (file_exists($file)) {
-                    header('Content-Description: File Transfer');
-                    header('Content-Type: application/octet-stream');
-                    header('Content-Disposition: attachment; filename="'.basename($file).'"');
-                    header('Expires: 0');
-                    header('Cache-Control: must-revalidate');
-                    header('Pragma: public');
-                    header('Content-Length: ' . filesize($file));
-                    readfile($file);
-                    exit;
-                }
-            }
-            break;
-            
-        case 'view':
-            if (isset($_GET['item'])) {
-                $file = $current_path . $_GET['item'];
-                if (file_exists($file)) {
-                    $mime = mime_content_type($file);
-                    header('Content-Type: '.$mime);
-                    readfile($file);
-                    exit;
-                }
-            }
-            break;
-    }
-    
-    if (!in_array($_GET['action'], ['download', 'view'])) {
-        header("Location: ?dir=" . urlencode($current_dir));
-        exit;
-    }
-}
-
-// Listar arquivos e pastas
-$items = scandir($current_path);
-$folders = [];
-$files = [];
-
-foreach ($items as $item) {
-    if ($item == '.' || $item == '..') continue;
-    
-    $path = $current_path . $item;
-    if (is_dir($path)) {
-        $folders[$item] = [
-            'type' => 'folder',
-            'size' => '-',
-            'modified' => date('d/m/Y H:i', filemtime($path))
-        ];
-    } else {
-        $files[$item] = [
-            'type' => 'file',
-            'size' => formatSize(filesize($path)),
-            'modified' => date('d/m/Y H:i', filemtime($path))
-        ];
-    }
-}
-
-// Função para formatar tamanhos
-function formatSize($bytes) {
-    if ($bytes >= 1073741824) {
-        return number_format($bytes / 1073741824, 2) . ' GB';
-    } elseif ($bytes >= 1048576) {
-        return number_format($bytes / 1048576, 2) . ' MB';
-    } elseif ($bytes >= 1024) {
-        return number_format($bytes / 1024, 2) . ' KB';
-    } else {
-        return $bytes . ' bytes';
-    }
-}
-?>
+echo "➤ Criando página de interface web..."
+cat > /var/www/html/open/webssh/index.html << 'EOL'
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gerenciador de Arquivos</title>
+    <title>Web SSH Client</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
-        .file-item:hover { background-color: #f3f4f6; }
-        .editor { min-height: 400px; }
-        .breadcrumb a:hover { text-decoration: underline; }
+        .terminal-container {
+            height: 70vh;
+        }
+        iframe {
+            border: none;
+            background: #000;
+        }
     </style>
 </head>
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
         <div class="bg-white rounded-lg shadow-md overflow-hidden">
-            <!-- Cabeçalho -->
             <div class="bg-blue-600 text-white px-6 py-4">
-                <h1 class="text-2xl font-bold">Gerenciador de Arquivos</h1>
-                <div class="breadcrumb text-sm mt-2">
-                    <?php
-                    $path_parts = explode('/', trim($current_dir, '/'));
-                    $current_path_breadcrumb = '';
-                    echo '<a href="?dir=" class="text-blue-200"><i class="fas fa-home"></i> /</a>';
-                    foreach ($path_parts as $part) {
-                        if (!empty($part)) {
-                            $current_path_breadcrumb .= $part . '/';
-                            echo ' <span class="text-white">›</span> <a href="?dir=' . urlencode($current_path_breadcrumb) . '" class="text-blue-200">' . htmlspecialchars($part) . '</a>';
-                        }
-                    }
-                    ?>
-                </div>
+                <h1 class="text-2xl font-bold">Web SSH Client</h1>
+                <p class="text-blue-200">Conexão SSH segura via navegador</p>
             </div>
-            
-            <!-- Barra de ferramentas -->
-            <div class="bg-gray-50 px-6 py-3 border-b flex flex-wrap gap-2">
-                <button onclick="showModal('createFolderModal')" class="px-3 py-1 bg-blue-100 text-blue-800 rounded hover:bg-blue-200 text-sm">
-                    <i class="fas fa-folder-plus"></i> Nova Pasta
-                </button>
-                <button onclick="showModal('createFileModal')" class="px-3 py-1 bg-blue-100 text-blue-800 rounded hover:bg-blue-200 text-sm">
-                    <i class="fas fa-file-alt"></i> Novo Arquivo
-                </button>
-                <form method="post" enctype="multipart/form-data" class="flex items-center">
-                    <input type="hidden" name="action" value="upload">
-                    <label class="px-3 py-1 bg-green-100 text-green-800 rounded hover:bg-green-200 cursor-pointer text-sm">
-                        <i class="fas fa-upload"></i> Upload
-                        <input type="file" name="file" class="hidden" onchange="this.form.submit()">
-                    </label>
+
+            <div class="p-6">
+                <div class="mb-6 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4">
+                    <p>⚠️ <strong>Importante:</strong> Esta ferramenta deve ser usada apenas em redes confiáveis.</p>
+                </div>
+
+                <form id="sshForm" class="mb-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-gray-700 mb-2">Servidor SSH</label>
+                            <input type="text" id="sshServer" class="w-full px-3 py-2 border rounded" placeholder="hostname ou IP" required>
+                        </div>
+                        <div>
+                            <label class="block text-gray-700 mb-2">Porta</label>
+                            <input type="number" id="sshPort" class="w-full px-3 py-2 border rounded" value="22" required>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-gray-700 mb-2">Usuário</label>
+                            <input type="text" id="sshUser" class="w-full px-3 py-2 border rounded" placeholder="usuário" required>
+                        </div>
+                        <div>
+                            <label class="block text-gray-700 mb-2">Método de Autenticação</label>
+                            <select id="authMethod" class="w-full px-3 py-2 border rounded">
+                                <option value="password">Senha</option>
+                                <option value="key">Chave SSH</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="passwordField" class="mb-4">
+                        <label class="block text-gray-700 mb-2">Senha</label>
+                        <input type="password" id="sshPassword" class="w-full px-3 py-2 border rounded" placeholder="senha">
+                    </div>
+
+                    <div id="keyField" class="mb-4 hidden">
+                        <label class="block text-gray-700 mb-2">Chave Privada SSH</label>
+                        <textarea id="sshKey" class="w-full px-3 py-2 border rounded h-32 font-mono text-sm" placeholder="Cole aqui o conteúdo da sua chave privada SSH"></textarea>
+                    </div>
+
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Conectar</button>
                 </form>
-                
-                <?php if (isset($_SESSION['clipboard'])): ?>
-                    <button onclick="location.href='?action=paste&dir=<?= urlencode($current_dir) ?>'" 
-                            class="px-3 py-1 bg-purple-100 text-purple-800 rounded hover:bg-purple-200 text-sm">
-                        <i class="fas fa-paste"></i> Colar (<?= $_SESSION['clipboard']['action'] == 'copy' ? 'Cópia' : 'Mover' ?>)
-                    </button>
-                <?php endif; ?>
+
+                <div id="terminalContainer" class="terminal-container hidden">
+                    <iframe id="sshTerminal" class="w-full h-full rounded-lg"></iframe>
+                </div>
             </div>
-            
-            <!-- Listagem de arquivos -->
-            <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nome</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tamanho</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Modificado</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ações</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white divide-y divide-gray-200">
-                        <!-- Pastas -->
-                        <?php foreach ($folders as $name => $info): ?>
-                            <tr class="file-item">
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <a href="?dir=<?= urlencode($current_dir . $name . '/') ?>" class="text-blue-600 hover:text-blue-800">
-                                        <i class="fas fa-folder text-yellow-500"></i> <?= htmlspecialchars($name) ?>
-                                    </a>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['size'] ?></td>
-                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['modified'] ?></td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="flex space-x-2">
-                                        <button onclick="renameItem('<?= htmlspecialchars($name) ?>')" class="text-blue-600 hover:text-blue-800">
-                                            <i class="fas fa-edit"></i>
-                                        </button>
-                                        <button onclick="copyItem('<?= htmlspecialchars($name) ?>')" class="text-green-600 hover:text-green-800">
-                                            <i class="far fa-copy"></i>
-                                        </button>
-                                        <button onclick="cutItem('<?= htmlspecialchars($name) ?>')" class="text-purple-600 hover:text-purple-800">
-                                            <i class="fas fa-cut"></i>
-                                        </button>
-                                        <button onclick="deleteItem('<?= htmlspecialchars($name) ?>')" class="text-red-600 hover:text-red-800">
-                                            <i class="fas fa-trash"></i>
-                                        </button>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                        
-                        <!-- Arquivos -->
-                        <?php foreach ($files as $name => $info): ?>
-                            <tr class="file-item">
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <?php
-                                    $icon = 'fa-file';
-                                    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
-                                    $icon_colors = [
-                                        'pdf' => 'text-red-500',
-                                        'jpg' => 'text-blue-500', 'jpeg' => 'text-blue-500', 'png' => 'text-blue-500', 'gif' => 'text-blue-500',
-                                        'doc' => 'text-blue-400', 'docx' => 'text-blue-400',
-                                        'xls' => 'text-green-500', 'xlsx' => 'text-green-500',
-                                        'zip' => 'text-yellow-500', 'rar' => 'text-yellow-500', '7z' => 'text-yellow-500',
-                                        'mp3' => 'text-purple-500', 'wav' => 'text-purple-500',
-                                        'mp4' => 'text-pink-500', 'avi' => 'text-pink-500', 'mkv' => 'text-pink-500'
-                                    ];
-                                    
-                                    if (array_key_exists($ext, $icon_colors)) {
-                                        $icon_color = $icon_colors[$ext];
-                                    } else {
-                                        $icon_color = 'text-gray-500';
-                                    }
-                                    ?>
-                                    <a href="?action=view&dir=<?= urlencode($current_dir) ?>&item=<?= urlencode($name) ?>" class="text-blue-600 hover:text-blue-800">
-                                        <i class="fas <?= $icon ?> <?= $icon_color ?>"></i> <?= htmlspecialchars($name) ?>
-                                    </a>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['size'] ?></td>
-                                <td class="px-6 py-4 whitespace-nowrap text-gray-500"><?= $info['modified'] ?></td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="flex space-x-2">
-                                        <button onclick="editFile('<?= htmlspecialchars($current_dir) ?>', '<?= htmlspecialchars($name) ?>')" class="text-blue-600 hover:text-blue-800">
-                                            <i class="fas fa-edit"></i>
-                                        </button>
-                                        <button onclick="copyItem('<?= htmlspecialchars($name) ?>')" class="text-green-600 hover:text-green-800">
-                                            <i class="far fa-copy"></i>
-                                        </button>
-                                        <button onclick="cutItem('<?= htmlspecialchars($name) ?>')" class="text-purple-600 hover:text-purple-800">
-                                            <i class="fas fa-cut"></i>
-                                        </button>
-                                        <button onclick="deleteItem('<?= htmlspecialchars($name) ?>')" class="text-red-600 hover:text-red-800">
-                                            <i class="fas fa-trash"></i>
-                                        </button>
-                                        <a href="?action=download&dir=<?= urlencode($current_dir) ?>&item=<?= urlencode($name) ?>" class="text-green-600 hover:text-green-800">
-                                            <i class="fas fa-download"></i>
-                                        </a>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modais -->
-    <div id="createFolderModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
-        <div class="bg-white rounded-lg p-6 w-96">
-            <h3 class="text-lg font-bold mb-4">Criar Nova Pasta</h3>
-            <form method="post" action="?action=create_folder&dir=<?= urlencode($current_dir) ?>">
-                <input type="text" name="folder_name" class="w-full px-3 py-2 border rounded mb-4" placeholder="Nome da pasta" required>
-                <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="hideModal('createFolderModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
-                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Criar</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <div id="createFileModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
-        <div class="bg-white rounded-lg p-6 w-96">
-            <h3 class="text-lg font-bold mb-4">Criar Novo Arquivo</h3>
-            <form method="post" action="?action=create_file&dir=<?= urlencode($current_dir) ?>">
-                <input type="text" name="file_name" class="w-full px-3 py-2 border rounded mb-4" placeholder="Nome do arquivo (ex: arquivo.txt)" required>
-                <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="hideModal('createFileModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
-                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Criar</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <div id="renameModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
-        <div class="bg-white rounded-lg p-6 w-96">
-            <h3 class="text-lg font-bold mb-4">Renomear</h3>
-            <form method="post" action="?action=rename&dir=<?= urlencode($current_dir) ?>">
-                <input type="hidden" id="oldName" name="old_name">
-                <input type="text" id="newName" name="new_name" class="w-full px-3 py-2 border rounded mb-4" required>
-                <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="hideModal('renameModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
-                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Renomear</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <div id="deleteModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
-        <div class="bg-white rounded-lg p-6 w-96">
-            <h3 class="text-lg font-bold mb-4">Confirmar Exclusão</h3>
-            <p class="mb-4">Tem certeza que deseja excluir <span id="itemToDelete" class="font-semibold"></span>?</p>
-            <div class="flex justify-end space-x-2">
-                <button type="button" onclick="hideModal('deleteModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
-                <button type="button" onclick="confirmDelete()" class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">Excluir</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="editorModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
-        <div class="bg-white rounded-lg p-6 w-full max-w-4xl max-h-screen overflow-auto">
-            <h3 class="text-lg font-bold mb-4" id="editorTitle">Editar Arquivo</h3>
-            <form method="post" action="?action=edit&dir=<?= urlencode($current_dir) ?>" id="editorForm">
-                <input type="hidden" id="editItem" name="item">
-                <textarea id="fileContent" name="content" class="w-full px-3 py-2 border rounded editor font-mono"></textarea>
-                <div class="flex justify-end space-x-2 mt-4">
-                    <button type="button" onclick="hideModal('editorModal')" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancelar</button>
-                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Salvar</button>
-                </div>
-            </form>
         </div>
     </div>
 
     <script>
-        // Funções para mostrar/esconder modais
-        function showModal(id) {
-            document.getElementById(id).classList.remove('hidden');
-        }
-        
-        function hideModal(id) {
-            document.getElementById(id).classList.add('hidden');
-        }
-        
-        // Funções para ações
-        function renameItem(name) {
-            document.getElementById('oldName').value = name;
-            document.getElementById('newName').value = name;
-            showModal('renameModal');
-        }
-        
-        function copyItem(name) {
-            location.href = `?action=copy&dir=<?= urlencode($current_dir) ?>&item=${encodeURIComponent(name)}`;
-        }
-        
-        function cutItem(name) {
-            location.href = `?action=cut&dir=<?= urlencode($current_dir) ?>&item=${encodeURIComponent(name)}`;
-        }
-        
-        function deleteItem(name) {
-            document.getElementById('itemToDelete').textContent = name;
-            window.itemToDelete = name;
-            showModal('deleteModal');
-        }
-        
-        function confirmDelete() {
-            location.href = `?action=delete&dir=<?= urlencode($current_dir) ?>&item=${encodeURIComponent(window.itemToDelete)}`;
-        }
-        
-        // Editor de arquivos
-        async function editFile(dir, file) {
-            document.getElementById('editorTitle').textContent = `Editando: ${file}`;
-            document.getElementById('editItem').value = file;
+        // Alternar entre senha e chave SSH
+        document.getElementById('authMethod').addEventListener('change', function() {
+            const method = this.value;
+            document.getElementById('passwordField').classList.toggle('hidden', method === 'key');
+            document.getElementById('keyField').classList.toggle('hidden', method !== 'key');
+        });
+
+        // Formulário de conexão
+        document.getElementById('sshForm').addEventListener('submit', function(e) {
+            e.preventDefault();
             
-            try {
-                const response = await fetch(`?action=view&dir=${encodeURIComponent(dir)}&item=${encodeURIComponent(file)}`);
-                const content = await response.text();
-                document.getElementById('fileContent').value = content;
-                showModal('editorModal');
-            } catch (error) {
-                alert('Erro ao carregar arquivo');
-                console.error(error);
+            const server = document.getElementById('sshServer').value;
+            const port = document.getElementById('sshPort').value;
+            const user = document.getElementById('sshUser').value;
+            const method = document.getElementById('authMethod').value;
+            
+            let url = `/shellinabox/ssh/${user}@${server}:${port}`;
+            
+            if (method === 'key') {
+                const key = document.getElementById('sshKey').value;
+                // Aqui seria necessário enviar a chave para o servidor de forma segura
+                // Em produção, isso deve ser feito via API segura
+                alert("⚠️ Em um ambiente real, o tratamento de chaves SSH deve ser feito com segurança via back-end");
+                return;
+            } else {
+                // Para conexão por senha, o ShellInABox lidará com a autenticação
+                url += '?auth=password';
             }
-        }
+            
+            document.getElementById('sshTerminal').src = url;
+            document.getElementById('terminalContainer').classList.remove('hidden');
+            document.getElementById('sshForm').classList.add('hidden');
+        });
     </script>
 </body>
 </html>
 EOL
+
+echo "➤ Configurando o ShellInABox..."
+cat > /etc/default/shellinabox << 'EOL'
+# ShellInABox Configuration
+SHELLINABOX_PORT=4200
+SHELLINABOX_ARGS="--no-beep --disable-ssl --service=/:SSH"
+EOL
+
+echo "➤ Configurando proxy reverso no Apache..."
+a2enmod proxy
+a2enmod proxy_http
+
+cat > /etc/apache2/conf-available/shellinabox.conf << 'EOL'
+<Location /shellinabox/>
+    ProxyPass http://127.0.0.1:4200/
+    ProxyPassReverse http://127.0.0.1:4200/
+</Location>
+EOL
+
+a2enconf shellinabox
 
 echo "➤ Configurando o firewall..."
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
 
-echo "➤ Ajustando configurações do PHP..."
-sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 100M/' /etc/php/*/apache2/php.ini
-sed -i 's/^post_max_size = .*/post_max_size = 100M/' /etc/php/*/apache2/php.ini
-sed -i 's/^memory_limit = .*/memory_limit = 256M/' /etc/php/*/apache2/php.ini
-
-echo "➤ Reiniciando o Apache..."
+echo "➤ Reiniciando serviços..."
+systemctl restart shellinabox
 systemctl restart apache2
 
 echo "✅ Instalação concluída com sucesso!"
-echo "Acesse seu gerenciador de arquivos em:"
-echo "http://$(curl -s ifconfig.me)/open/gerenciador/"
+echo "Acesse o Web SSH Client em:"
+echo "http://$(curl -s ifconfig.me)/open/webssh/"
 echo ""
-echo "⚠️ Dicas de segurança:"
-echo "1. Considere proteger o diretório com autenticação"
-echo "2. Monitore o uso deste gerenciador de arquivos"
+echo "⚠️ IMPORTANTE: Medidas de segurança recomendadas:"
+echo "1. Proteja o diretório /open/webssh/ com autenticação"
+echo "2. Considere habilitar SSL para conexões seguras"
 echo "3. Restrinja o acesso por IP se necessário"
