@@ -1,0 +1,709 @@
+#!/bin/bash
+
+# set -e: Sai imediatamente se um comando falhar.
+set -e
+
+# --- Variáveis de Configuração ---
+PROJECT_DIR="/var/www/html/open"
+NODE_USER="www-data" # Usuário padrão para webservers em Debian/Ubuntu. Mude se necessário.
+
+# --- Verificação de Root ---
+if [ "$EUID" -ne 0 ]; then
+  echo "Este script precisa ser executado com privilégios de root. Use: sudo ./setup_iptv_organizer.sh"
+  exit 1
+fi
+
+echo "Iniciando a configuração do Organizador IPTV em $PROJECT_DIR..."
+
+# --- 1. Criar Estrutura de Diretórios ---
+echo "=> Criando diretórios..."
+mkdir -p "$PROJECT_DIR/public"
+mkdir -p "$PROJECT_DIR/downloads"
+echo "Diretórios criados com sucesso."
+
+# --- 2. Criar Arquivos do Projeto usando 'Here Documents' ---
+
+# package.json
+echo "=> Criando package.json..."
+cat <<'EOF' > "$PROJECT_DIR/package.json"
+{
+  "name": "iptv-organizer-server",
+  "version": "1.0.0",
+  "description": "Servidor para o Organizador Avançado de Listas IPTV",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "iptv",
+    "m3u"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.8",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
+EOF
+
+# server.js
+echo "=> Criando server.js..."
+cat <<'EOF' > "$PROJECT_DIR/server.js"
+const express = require('express');
+const axios = require('axios');
+const fs = require('fs').promises;
+const path = require('path');
+const cors = require('cors');
+
+const app = express();
+const PORT = 3000;
+
+// --- Middlewares ---
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+
+// --- Configuração das Pastas ---
+const downloadsDir = path.join(__dirname, 'downloads');
+
+const ensureDownloadsDirExists = async () => {
+    try {
+        await fs.access(downloadsDir);
+    } catch (error) {
+        console.log('Criando pasta de downloads...');
+        await fs.mkdir(downloadsDir);
+    }
+};
+
+// --- Rota da API para baixar a URL ---
+app.post('/download-url', async (req, res) => {
+    const { url } = req.body;
+
+    if (!url) {
+        return res.status(400).json({ success: false, error: 'URL não fornecida.' });
+    }
+
+    try {
+        console.log(`Recebido pedido para baixar: ${url}`);
+        
+        const response = await axios.get(url, { responseType: 'text' });
+        const m3uContent = response.data;
+
+        const urlObject = new URL(url);
+        const baseName = path.basename(urlObject.pathname);
+        const safeFilename = baseName.replace(/[^a-z0-9._-]/gi, '_') || 'lista.m3u';
+        const timestamp = Date.now();
+        const finalFilename = `${timestamp}_${safeFilename}`;
+        const filePath = path.join(downloadsDir, finalFilename);
+
+        await fs.writeFile(filePath, m3uContent);
+        console.log(`Arquivo salvo com sucesso em: ${filePath}`);
+
+        res.json({
+            success: true,
+            content: m3uContent,
+            message: `Arquivo baixado e salvo como ${finalFilename}`
+        });
+
+    } catch (error) {
+        console.error(`Erro ao baixar ou salvar a URL ${url}:`, error.message);
+        res.status(500).json({ success: false, error: `Falha ao processar a URL. Detalhes: ${error.message}` });
+    }
+});
+
+// --- Iniciar o Servidor ---
+app.listen(PORT, async () => {
+    await ensureDownloadsDirExists();
+    console.log(`Servidor rodando na porta ${PORT}`);
+    console.log(`Acesse a aplicação via reverse proxy ou em http://localhost:${PORT}`);
+});
+EOF
+
+# public/v3.html
+echo "=> Criando public/v3.html..."
+cat <<'EOF' > "$PROJECT_DIR/public/v3.html"
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Organizador Avançado de Listas IPTV</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container mt-4 mb-5">
+        <header class="text-center mb-4">
+            <h1>📺 Organizador Avançado de Listas IPTV</h1>
+            <p class="lead">Carregue, mescle grupos, organize logos, filtre e exporte sua lista perfeita.</p>
+        </header>
+
+        <!-- Seção 1: Fontes de Dados -->
+        <div class="card mb-3">
+            <div class="card-header"><strong>1. Adicione as Fontes</strong></div>
+            <div class="card-body">
+                <h5>Adicionar por URL</h5>
+                <div id="urlListContainer"><div class="input-group mb-2"><input type="url" class="form-control url-input" placeholder="https://exemplo.com/lista1.m3u"></div></div>
+                <button class="btn btn-outline-secondary btn-sm mb-3" type="button" id="addUrlBtn">+ Adicionar outra URL</button>
+                <hr>
+                <h5>Ou carregar arquivo(s) do computador</h5>
+                <div class="mb-2"><input class="form-control" type="file" id="localFileInput" accept=".m3u,.m3u8" multiple></div>
+                <div id="localFileStatus" class="form-text">Nenhum arquivo selecionado.</div>
+            </div>
+        </div>
+        <div class="d-grid gap-2 mb-4"><button class="btn btn-primary btn-lg" type="button" id="loadAndMergeBtn">Carregar Listas</button></div>
+        <div id="alertContainer"></div>
+
+        <!-- Seção 2: Ferramentas de Organização -->
+        <div class="card mb-4" id="filtersCard" style="display: none;">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
+                <strong>2. Ferramentas de Organização</strong>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button class="btn btn-secondary" id="openGroupManagerBtn">Gerenciar Grupos...</button>
+                    <button class="btn btn-secondary" id="openLogoManagerBtn">Gerenciar Logos...</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <h6>Construtor de Filtros</h6>
+                <div id="filterRuleContainer"></div>
+                <div class="d-flex justify-content-between align-items-center mt-3">
+                    <button class="btn btn-outline-primary" id="addFilterRuleBtn">+ Adicionar Regra</button>
+                    <button class="btn btn-info" id="applyFiltersBtn">Aplicar Filtros</button>
+                </div>
+            </div>
+            <div class="card-footer d-flex justify-content-between align-items-center">
+                <div class="text-muted">Total: <span id="totalChannels">0</span> | Visíveis: <span id="visibleChannels">0</span></div>
+                <button class="btn btn-success" id="exportBtn">Exportar Lista Visível</button>
+            </div>
+        </div>
+        
+        <input type="file" id="logoFolderInput" webkitdirectory directory multiple style="display: none;" />
+
+        <!-- Tabela de Canais -->
+        <div id="loadingSpinner" class="text-center mt-4" style="display: none;"><div class="spinner-border" role="status"><span class="visually-hidden">Carregando...</span></div></div>
+        <div class="table-responsive"><table class="table table-hover align-middle"><thead><tr><th scope="col" style="width: 10%;">Logo</th><th scope="col">Nome do Canal</th><th scope="col">Grupo</th></tr></thead><tbody id="channelList"></tbody></table></div>
+    </div>
+
+    <!-- MODAL DE GERENCIAMENTO DE GRUPOS -->
+    <div class="modal fade" id="groupMergeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="groupMergeModalLabel">Gerenciar e Mesclar Grupos</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="p-3 mb-3 bg-light-subtle border rounded">
+                        <h6 class="mb-2">Ferramenta de Auto-Mesclagem</h6>
+                        <p class="form-text mt-0 mb-2">Clique para encontrar e sugerir mesclagens para grupos com nomes similares.</p>
+                        <button class="btn btn-info btn-sm" id="suggestMergesBtn">Sugerir Mesclagens Automáticas</button>
+                    </div>
+                    <div id="mergeSuggestionsContainer" class="mb-3"></div>
+                    <hr>
+                    <div class="row">
+                        <div class="col-md-5">
+                            <label class="form-label">Grupos Atuais / Mesclagem Manual:</label>
+                            <select class="form-select" id="groupListSelect" multiple></select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="newGroupNameInput" class="form-label">Novo nome do grupo:</label>
+                            <input type="text" class="form-control mb-3" id="newGroupNameInput" placeholder="Ex: Filmes">
+                            <button class="btn btn-primary w-100" id="mergeSelectedGroupsBtn">Mesclar Selecionados Manualmente</button>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Log de Alterações:</label>
+                            <div id="mergeLog" class="form-text bg-body-secondary p-2 rounded" style="height: 150px; overflow-y: auto;">Nenhuma mesclagem.</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-warning me-auto" id="undoMergeBtn" disabled>Desfazer Última Mesclagem</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+                    <button type="button" class="btn btn-primary" id="saveAndCloseMergeBtn">Salvar e Fechar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- NOVO MODAL: GERENCIAMENTO DE LOGOS -->
+    <div class="modal fade" id="logoUpdateModal" tabindex="-1" aria-labelledby="logoUpdateModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="logoUpdateModalLabel">Sugestões de Atualização de Logos</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info small">
+                        <strong>Como funciona:</strong> O sistema comparou os nomes dos seus canais com os nomes dos arquivos na pasta de logos selecionada. Revise as sugestões abaixo. Ao aceitar, o logo será atualizado. Ao exportar, o atributo `tvg-logo` será alterado para o nome do novo arquivo (ex: `tvg-logo="meu_logo.png"`).
+                    </div>
+                    <div id="logoSuggestionsContainer"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Fechar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
+EOF
+
+# public/style.css
+echo "=> Criando public/style.css..."
+cat <<'EOF' > "$PROJECT_DIR/public/style.css"
+body {
+    background-color: #f8f9fa;
+}
+
+.table img.channel-logo {
+    max-width: 60px;
+    max-height: 40px;
+    background-color: #eee;
+    border-radius: 4px;
+    object-fit: contain;
+}
+
+.table-hover > tbody > tr:hover {
+    cursor: pointer;
+}
+
+.remove-url-btn, .remove-rule-btn {
+    cursor: pointer;
+}
+
+.filter-rule {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+#groupListSelect {
+    height: 250px;
+}
+
+.suggestion-card {
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.suggestion-card .badge {
+    margin-right: 0.25rem;
+    margin-bottom: 0.25rem;
+    font-size: 0.8em;
+}
+
+.logo-suggestion {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem;
+    border-bottom: 1px solid #eee;
+}
+.logo-suggestion:last-child {
+    border-bottom: none;
+}
+.logo-suggestion .channel-name {
+    flex-grow: 1;
+    font-weight: 500;
+}
+.logo-suggestion .logo-comparison {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.logo-suggestion .logo-comparison img {
+    height: 30px;
+    width: auto;
+    max-width: 50px;
+    object-fit: contain;
+    background-color: #f0f0f0;
+    border: 1px solid #ddd;
+}
+EOF
+
+# public/script.js
+echo "=> Criando public/script.js..."
+cat <<'EOF' > "$PROJECT_DIR/public/script.js"
+document.addEventListener('DOMContentLoaded', () => {
+    // --- Elementos do DOM ---
+    const loadAndMergeBtn = document.getElementById('loadAndMergeBtn');
+    const filtersCard = document.getElementById('filtersCard');
+    const channelList = document.getElementById('channelList');
+    const openGroupManagerBtn = document.getElementById('openGroupManagerBtn');
+    const groupMergeModalEl = document.getElementById('groupMergeModal');
+    const groupMergeModal = new bootstrap.Modal(groupMergeModalEl);
+    const suggestMergesBtn = document.getElementById('suggestMergesBtn');
+    const mergeSuggestionsContainer = document.getElementById('mergeSuggestionsContainer');
+    const saveAndCloseMergeBtn = document.getElementById('saveAndCloseMergeBtn');
+    const urlListContainer = document.getElementById('urlListContainer');
+    const addUrlBtn = document.getElementById('addUrlBtn');
+    const localFileInput = document.getElementById('localFileInput');
+    const localFileStatus = document.getElementById('localFileStatus');
+    const exportBtn = document.getElementById('exportBtn');
+    const loadingSpinner = document.getElementById('loadingSpinner');
+    const alertContainer = document.getElementById('alertContainer');
+    const filterRuleContainer = document.getElementById('filterRuleContainer');
+    const addFilterRuleBtn = document.getElementById('addFilterRuleBtn');
+    const applyFiltersBtn = document.getElementById('applyFiltersBtn');
+    const mergeSelectedGroupsBtn = document.getElementById('mergeSelectedGroupsBtn');
+    const undoMergeBtn = document.getElementById('undoMergeBtn');
+    const openLogoManagerBtn = document.getElementById('openLogoManagerBtn');
+    const logoFolderInput = document.getElementById('logoFolderInput');
+    const logoUpdateModalEl = document.getElementById('logoUpdateModal');
+    const logoUpdateModal = new bootstrap.Modal(logoUpdateModalEl);
+    const logoSuggestionsContainer = document.getElementById('logoSuggestionsContainer');
+    
+    // --- Armazenamento de dados ---
+    let allChannels = [];
+    let filteredChannels = [];
+    let preMergeState = [];
+    let totalSourceCount = 0;
+    let localLogos = new Map();
+
+    // --- Funções Auxiliares ---
+    function getSuperscript(num) { const superscripts = '⁰¹²³⁴⁵⁶⁷⁸⁹'; return String(num).split('').map(digit => superscripts[parseInt(digit, 10)]).join(''); }
+
+    function createNormalizationKey(groupName) {
+        if (!groupName) return '';
+        const noiseWords = /\b(hd|fhd|sd|4k|8k|h265|hevc|canais|canal|grupo|lista|tv|online|uhd|1080p|720p|br|brasil|pt|ao vivo|series|filmes|esportes)\b/g;
+        let normalized = groupName.toLowerCase();
+        normalized = normalized.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        normalized = normalized.replace(/[^a-z0-9\s]/g, '');
+        normalized = normalized.replace(noiseWords, '');
+        normalized = normalized.replace(/\s+/g, ' ').trim();
+        return normalized;
+    }
+    
+    // --- FUNÇÃO MODIFICADA PARA USAR O BACKEND ---
+    async function loadAndMergeLists() {
+        loadingSpinner.style.display = 'block';
+        channelList.innerHTML = '';
+        filtersCard.style.display = 'none';
+        allChannels = [];
+        showAlert('', 'info', true);
+
+        const urlInputs = document.querySelectorAll('.url-input');
+        const urls = Array.from(urlInputs).map(input => input.value.trim()).filter(url => url);
+        const localFiles = localFileInput.files;
+        totalSourceCount = urls.length + localFiles.length;
+
+        if (totalSourceCount === 0) {
+            showAlert('Adicione uma URL ou selecione um arquivo.', 'warning');
+            loadingSpinner.style.display = 'none';
+            return;
+        }
+
+        const promises = [];
+
+        // --- Processamento de URLs via Backend ---
+        urls.forEach(url => {
+            const promise = fetch('/download-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: url }),
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(err => { throw new Error(err.error || `Erro do servidor: ${response.statusText}`) });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (!data.success) { throw new Error(data.error); }
+                return data.content;
+            });
+            promises.push(promise);
+        });
+
+        // --- Processamento de Arquivos Locais ---
+        if (localFiles.length > 0) {
+            for (const file of localFiles) {
+                promises.push(new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = () => reject(new Error(`Falha ao ler o arquivo: ${file.name}`));
+                    reader.readAsText(file);
+                }));
+            }
+        }
+
+        const results = await Promise.allSettled(promises);
+        let mergedChannels = [];
+        const seenUrls = new Set();
+        results.forEach((result, index) => {
+            if (result.status === 'fulfilled') {
+                const sourceIndex = index + 1;
+                const parsed = parseM3uText(result.value, sourceIndex);
+                parsed.forEach(channel => {
+                    if (channel.url && !seenUrls.has(channel.url)) {
+                        mergedChannels.push(channel);
+                        seenUrls.add(channel.url);
+                    }
+                });
+            } else {
+                console.error('Falha:', result.reason);
+                showAlert(`Uma fonte falhou: ${result.reason.message}`, 'warning', false);
+            }
+        });
+        allChannels = mergedChannels;
+        loadingSpinner.style.display = 'none';
+        if (allChannels.length > 0) {
+            showAlert(`Sucesso! ${allChannels.length} canais únicos carregados de ${totalSourceCount} fonte(s).`, 'success');
+            filtersCard.style.display = 'block';
+            filterRuleContainer.innerHTML = '';
+            addFilterRule();
+            applyFilters();
+        } else {
+            showAlert('Nenhum canal encontrado nas fontes.', 'danger');
+        }
+    }
+    
+    // --- Restante do código Javascript original (sem alterações) ---
+    function parseM3uText(m3uText, sourceIndex) {
+        const lines = m3uText.split('\n'); const channels = []; let currentChannel = {};
+        if (!lines[0].trim().startsWith('#EXTM3U')) console.warn("Cabeçalho #EXTM3U não encontrado.");
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('#EXTINF:')) {
+                const infoMatch = trimmedLine.match(/#EXTINF:-1 (.*),(.*)/);
+                if (infoMatch) {
+                    const attributes = infoMatch[1]; const name = infoMatch[2];
+                    const logoMatch = attributes.match(/tvg-logo="([^"]*)"/); const groupMatch = attributes.match(/group-title="([^"]*)"/);
+                    currentChannel = { name: name.trim(), logo: logoMatch ? logoMatch[1] : 'https://via.placeholder.com/60x40.png?text=?', group: groupMatch ? groupMatch[1] : 'Sem Grupo', attributes: attributes, url: '', sourceIndex: sourceIndex };
+                }
+            } else if (trimmedLine && !trimmedLine.startsWith('#') && currentChannel.name) {
+                currentChannel.url = trimmedLine; channels.push(currentChannel); currentChannel = {};
+            }
+        }
+        return channels;
+    }
+    function performMerge(groupsToMerge, newGroupName) {
+        preMergeState = allChannels.map(channel => ({ ...channel }));
+        allChannels.forEach(channel => { if (groupsToMerge.includes(channel.group)) { channel.group = newGroupName; } });
+        populateGroupManager();
+        const mergeLog = document.getElementById('mergeLog');
+        if (mergeLog.textContent.includes('Nenhuma mesclagem')) { mergeLog.innerHTML = ''; }
+        mergeLog.innerHTML += `<p class="mb-1 small">✔️ [${groupsToMerge.join(', ')}] → "<strong>${newGroupName}</strong>".</p>`;
+        mergeLog.scrollTop = mergeLog.scrollHeight;
+        undoMergeBtn.disabled = false;
+    }
+    function handleManualMergeAction() {
+        const groupListSelect = document.getElementById('groupListSelect');
+        const newGroupNameInput = document.getElementById('newGroupNameInput');
+        const selectedOptions = Array.from(groupListSelect.selectedOptions);
+        const groupsToMerge = selectedOptions.map(opt => opt.value);
+        const newGroupName = newGroupNameInput.value.trim();
+        if (groupsToMerge.length < 2) { alert('Selecione pelo menos dois grupos.'); return; }
+        if (!newGroupName) { alert('Digite um novo nome para o grupo.'); return; }
+        performMerge(groupsToMerge, newGroupName);
+        newGroupNameInput.value = '';
+    }
+    function handleSuggestMerges() {
+        const uniqueGroups = [...new Set(allChannels.map(c => c.group))];
+        const suggestions = new Map();
+        uniqueGroups.forEach(group => { const key = createNormalizationKey(group); if (!key) return; if (!suggestions.has(key)) { suggestions.set(key, []); } suggestions.get(key).push(group); });
+        mergeSuggestionsContainer.innerHTML = '';
+        let suggestionsFound = 0;
+        suggestions.forEach((groups, key) => {
+            if (groups.length > 1) {
+                suggestionsFound++;
+                const card = document.createElement('div'); card.className = 'suggestion-card';
+                const originalGroupsHtml = groups.map(g => `<span class="badge bg-secondary">${g}</span>`).join('');
+                const suggestedName = key.charAt(0).toUpperCase() + key.slice(1);
+                card.innerHTML = `<p class="mb-2"><strong>Grupos Similares Encontrados:</strong></p><div class="mb-3">${originalGroupsHtml}</div><div class="input-group"><span class="input-group-text">Novo Nome:</span><input type="text" class="form-control form-control-sm" value="${suggestedName}"><button class="btn btn-sm btn-outline-success accept-suggestion-btn">Aceitar Mesclagem</button></div>`;
+                mergeSuggestionsContainer.appendChild(card);
+                card.querySelector('.accept-suggestion-btn').addEventListener('click', (e) => {
+                    const btn = e.currentTarget; const cardElement = btn.closest('.suggestion-card');
+                    const newName = cardElement.querySelector('input').value.trim();
+                    if (newName) { performMerge(groups, newName); cardElement.remove(); } else { alert('O novo nome não pode ser vazio.'); }
+                });
+            }
+        });
+        if (suggestionsFound === 0) { mergeSuggestionsContainer.innerHTML = `<div class="alert alert-success" role="alert">Nenhuma sugestão de mesclagem automática encontrada.</div>`; }
+    }
+    function handleUndoAction() { if (preMergeState.length === 0) return; allChannels = preMergeState; preMergeState = []; populateGroupManager(); document.getElementById('mergeLog').innerHTML += `<p class="mb-1 small text-warning">↪️ A última mesclagem foi desfeita.</p>`; undoMergeBtn.disabled = true; }
+    function saveAndCloseMerge() { applyFilters(); groupMergeModal.hide(); }
+    async function handleLogoFolderSelection(event) {
+        const files = event.target.files;
+        if (!files || files.length === 0) return;
+        showAlert('Processando pasta de logos...', 'info');
+        localLogos.clear();
+        for (const file of files) {
+            const key = createNormalizationKey(file.name.split('.').slice(0, -1).join('.'));
+            if (key) { localLogos.set(key, file); }
+        }
+        generateLogoSuggestions();
+        showAlert('Processamento de logos concluído. Revise as sugestões.', 'success');
+    }
+    function generateLogoSuggestions() {
+        logoSuggestionsContainer.innerHTML = '';
+        let suggestionsFound = 0;
+        allChannels.forEach((channel, index) => {
+            const channelKey = createNormalizationKey(channel.name);
+            if (localLogos.has(channelKey)) {
+                suggestionsFound++;
+                const logoFile = localLogos.get(channelKey);
+                const newLogoUrl = URL.createObjectURL(logoFile);
+                const card = document.createElement('div');
+                card.className = 'logo-suggestion';
+                card.innerHTML = `<div class="channel-name">${channel.name}</div><div class="logo-comparison"><img src="${channel.logo}" alt="Logo Atual" title="Logo Atual"><span class="fs-4">→</span><img src="${newLogoUrl}" alt="Logo Sugerido" title="Logo Sugerido: ${logoFile.name}"></div><div class="ms-auto btn-group btn-group-sm"><button class="btn btn-outline-success accept-logo-btn" data-channel-index="${index}" data-logo-file="${logoFile.name}">Aceitar</button><button class="btn btn-outline-secondary ignore-logo-btn">Ignorar</button></div>`;
+                logoSuggestionsContainer.appendChild(card);
+            }
+        });
+        if (suggestionsFound === 0) { logoSuggestionsContainer.innerHTML = `<div class="alert alert-warning">Nenhuma correspondência automática encontrada.</div>`; }
+        logoUpdateModal.show();
+    }
+    function applyFilters() {
+        const ruleElements = document.querySelectorAll('.filter-rule');
+        const rules = Array.from(ruleElements).map(el => ({ action: el.querySelector('.filter-action').value, field: el.querySelector('.filter-field').value, condition: el.querySelector('.filter-condition').value, value: el.querySelector('.filter-value').value.trim() }));
+        const keepRules = rules.filter(r => r.action === 'keep' && r.value);
+        const excludeRules = rules.filter(r => r.action === 'exclude' && r.value);
+        let channelsToShow = allChannels;
+        if (keepRules.length > 0) { channelsToShow = allChannels.filter(channel => keepRules.some(rule => channelMatchesRule(channel, rule))); }
+        if (excludeRules.length > 0) { channelsToShow = channelsToShow.filter(channel => !excludeRules.some(rule => channelMatchesRule(channel, rule))); }
+        channelsToShow.sort((a, b) => { const groupCompare = a.group.localeCompare(b.group); if (groupCompare !== 0) { return groupCompare; } return a.name.localeCompare(b.name); });
+        filteredChannels = channelsToShow;
+        renderChannels(filteredChannels);
+    }
+    function renderChannels(channelsToRender) {
+        const totalChannelsSpan = document.getElementById('totalChannels');
+        const visibleChannelsSpan = document.getElementById('visibleChannels');
+        channelList.innerHTML = '';
+        if (channelsToRender.length === 0) { channelList.innerHTML = '<tr><td colspan="3" class="text-center">Nenhum canal corresponde aos filtros.</td></tr>'; } else {
+            const fragment = document.createDocumentFragment();
+            channelsToRender.forEach(channel => {
+                const row = document.createElement('tr');
+                const displayName = totalSourceCount > 1 ? `${channel.name} ${getSuperscript(channel.sourceIndex)}` : channel.name;
+                row.innerHTML = `<td><img src="${channel.logo}" alt="Logo" class="channel-logo" onerror="this.onerror=null;this.src='https://via.placeholder.com/60x40.png?text=Err';"></td><td>${displayName}</td><td>${channel.group}</td>`;
+                fragment.appendChild(row);
+            });
+            channelList.appendChild(fragment);
+        }
+        totalChannelsSpan.textContent = allChannels.length;
+        visibleChannelsSpan.textContent = channelsToRender.length;
+    }
+    function exportFilteredList() {
+        if (filteredChannels.length === 0) { showAlert('Não há canais para exportar.', 'info'); return; }
+        let m3uContent = "#EXTM3U\n";
+        filteredChannels.forEach(channel => {
+            let currentAttributes = channel.attributes;
+            if (channel.newLogoFilename) { currentAttributes = currentAttributes.replace(/tvg-logo="[^"]*"\s*/, ''); currentAttributes = `tvg-logo="${channel.newLogoFilename}" ${currentAttributes}`; }
+            currentAttributes = currentAttributes.replace(/group-title="[^"]*"\s*/, '');
+            const newAttributes = `group-title="${channel.group}" ${currentAttributes}`.trim();
+            const exportName = totalSourceCount > 1 ? `${channel.name} ${getSuperscript(channel.sourceIndex)}` : channel.name;
+            const newExtInfLine = `#EXTINF:-1 ${newAttributes},${exportName}`;
+            m3uContent += `${newExtInfLine}\n${channel.url}\n`;
+        });
+        const blob = new Blob([m3uContent], { type: 'application/x-mpegURL;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'lista_organizada.m3u';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    }
+    function channelMatchesRule(channel, rule) { const channelValue = (rule.field === 'name' ? channel.name : channel.group).toLowerCase(); const filterValue = rule.value.toLowerCase(); if (!filterValue) return false; switch (rule.condition) { case 'contains': return channelValue.includes(filterValue); case 'not_contains': return !channelValue.includes(filterValue); case 'starts_with': return channelValue.startsWith(filterValue); case 'ends_with': return channelValue.endsWith(filterValue); case 'is_exactly': return channelValue === filterValue; default: return false; } }
+    function populateGroupManager() { const groupListSelect = document.getElementById('groupListSelect'); groupListSelect.innerHTML = ''; const groups = [...new Set(allChannels.map(c => c.group))].sort(); groups.forEach(group => { const option = document.createElement('option'); option.value = group; option.textContent = group; groupListSelect.appendChild(option); }); }
+    function addUrlInput() { const div = document.createElement('div'); div.className = 'input-group mb-2'; div.innerHTML = `<input type="url" class="form-control url-input" placeholder="https://exemplo.com/outra_lista.m3u"><button class="btn btn-outline-danger remove-url-btn" type="button">Remover</button>`; urlListContainer.appendChild(div); div.querySelector('.remove-url-btn').addEventListener('click', () => div.remove()); }
+    function updateLocalFileStatus() { const numFiles = localFileInput.files.length; if (numFiles === 0) localFileStatus.textContent = 'Nenhum arquivo selecionado.'; else if (numFiles === 1) localFileStatus.textContent = `1 arquivo selecionado: ${localFileInput.files[0].name}`; else localFileStatus.textContent = `${numFiles} arquivos selecionados.`; }
+    function addFilterRule() { const ruleDiv = document.createElement('div'); ruleDiv.className = 'filter-rule'; ruleDiv.innerHTML = `<select class="form-select filter-action" style="width: 120px;"><option value="keep">Manter</option><option value="exclude">Excluir</option></select><select class="form-select filter-field" style="width: 150px;"><option value="name">Nome Canal</option><option value="group">Grupo</option></select><select class="form-select filter-condition"><option value="contains">Contém</option><option value="not_contains">Não Contém</option><option value="starts_with">Começa com</option><option value="ends_with">Termina com</option><option value="is_exactly">É exatamente</option></select><input type="text" class="form-control filter-value" placeholder="Valor..."><button class="btn btn-sm btn-outline-danger remove-rule-btn">×</button>`; filterRuleContainer.appendChild(ruleDiv); ruleDiv.querySelector('.remove-rule-btn').addEventListener('click', () => ruleDiv.remove()); }
+    function showAlert(message, type = 'info', clearFirst = true) { if (clearFirst) alertContainer.innerHTML = ''; if (!message) return; const wrapper = document.createElement('div'); wrapper.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show" role="alert">${message}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div>`; alertContainer.append(wrapper); }
+    addUrlBtn.addEventListener('click', addUrlInput);
+    localFileInput.addEventListener('change', updateLocalFileStatus);
+    loadAndMergeBtn.addEventListener('click', loadAndMergeLists);
+    addFilterRuleBtn.addEventListener('click', addFilterRule);
+    applyFiltersBtn.addEventListener('click', applyFilters);
+    exportBtn.addEventListener('click', exportFilteredList);
+    openGroupManagerBtn.addEventListener('click', () => { mergeSuggestionsContainer.innerHTML = ''; populateGroupManager(); document.getElementById('mergeLog').textContent = 'Nenhuma mesclagem.'; undoMergeBtn.disabled = true; groupMergeModal.show(); });
+    mergeSelectedGroupsBtn.addEventListener('click', handleManualMergeAction);
+    suggestMergesBtn.addEventListener('click', handleSuggestMerges);
+    undoMergeBtn.addEventListener('click', handleUndoAction);
+    saveAndCloseMergeBtn.addEventListener('click', saveAndCloseMerge);
+    openLogoManagerBtn.addEventListener('click', () => { if (allChannels.length === 0) { showAlert('Carregue uma lista de canais antes de gerenciar logos.', 'warning'); return; } logoFolderInput.click(); });
+    logoFolderInput.addEventListener('change', handleLogoFolderSelection);
+    logoSuggestionsContainer.addEventListener('click', (e) => {
+        if (e.target.classList.contains('accept-logo-btn')) {
+            const btn = e.target;
+            const channelIndex = parseInt(btn.dataset.channelIndex, 10);
+            const logoFilename = btn.dataset.logoFile;
+            const channel = allChannels[channelIndex];
+            if (channel) {
+                channel.newLogoFilename = logoFilename;
+                channel.logo = btn.closest('.logo-suggestion').querySelector('.logo-comparison img:last-child').src;
+                applyFilters();
+                btn.closest('.logo-suggestion').classList.add('table-success');
+                btn.parentElement.innerHTML = '✔️ Aceito';
+            }
+        }
+        if (e.target.classList.contains('ignore-logo-btn')) {
+            e.target.closest('.logo-suggestion').remove();
+        }
+    });
+});
+EOF
+
+echo "Arquivos criados com sucesso."
+
+# --- 3. Instalar Dependências ---
+echo "=> Navegando para $PROJECT_DIR e instalando dependências com npm..."
+# Mudar para o diretório do projeto para executar o npm install
+cd "$PROJECT_DIR"
+npm install
+echo "Dependências instaladas."
+
+# --- 4. Definir Permissões ---
+echo "=> Definindo permissões..."
+# Mudar o dono de todos os arquivos para o usuário do servidor web
+chown -R $NODE_USER:$NODE_USER "$PROJECT_DIR"
+
+# Definir permissões: 755 para diretórios, 644 para arquivos
+chmod -R 755 "$PROJECT_DIR"
+chmod -R 644 "$PROJECT_DIR"/*
+# A pasta de uploads precisa de permissão de escrita para o dono e grupo
+chmod -R 775 "$PROJECT_DIR/downloads"
+
+echo "Permissões definidas com sucesso."
+
+# --- 5. Mensagem Final e Próximos Passos ---
+echo -e "\n\n✅ INSTALAÇÃO CONCLUÍDA! ✅\n"
+echo "--- PRÓXIMOS PASSOS ---"
+echo "1. Inicie a aplicação com PM2 (gerenciador de processos):"
+echo "   sudo -u $NODE_USER pm2 start $PROJECT_DIR/server.js --name iptv-organizer"
+echo "   pm2 save # Para salvar a lista de processos e reiniciar automaticamente"
+echo ""
+echo "2. Configure um Reverse Proxy (Nginx) para acessar a aplicação de forma segura."
+echo "   Crie um arquivo em /etc/nginx/sites-available/iptv.conf com o seguinte conteúdo:"
+echo "---------------------------------------------------------"
+echo "server {"
+echo "    listen 80;"
+echo "    server_name seu_dominio.com ou_ip_do_servidor;"
+echo ""
+echo "    location /open/ {"
+echo "        # Proxy para a aplicação Node.js rodando na porta 3000"
+echo "        proxy_pass http://localhost:3000/;"
+echo "        proxy_http_version 1.1;"
+echo "        proxy_set_header Upgrade \$http_upgrade;"
+echo "        proxy_set_header Connection 'upgrade';"
+echo "        proxy_set_header Host \$host;"
+echo "        proxy_cache_bypass \$http_upgrade;"
+echo ""
+echo "        # Reescrita para servir os arquivos estáticos corretamente"
+echo "        rewrite ^/open/(.*) /\$1 break;"
+echo "        proxy_set_header X-Real-IP \$remote_addr;"
+echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+echo "    }"
+echo "}"
+echo "---------------------------------------------------------"
+echo "   Depois, ative o site e reinicie o Nginx:"
+echo "   sudo ln -s /etc/nginx/sites-available/iptv.conf /etc/nginx/sites-enabled/"
+echo "   sudo nginx -t"
+echo "   sudo systemctl restart nginx"
+echo ""
+echo "3. Acesse sua aplicação em: http://seu_dominio.com/open/v3.html"
+echo ""
